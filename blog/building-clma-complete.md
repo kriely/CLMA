@@ -10,7 +10,7 @@
 
 ### The One-Off Generation Trap
 
-If you've spent any time using ChatGPT, Claude, or GitHub Copilot for coding, you've experienced this cycle: ask → get code → try to run → it fails → paste error → get fix → something else breaks → lather, rinse, repeat.
+If you've spent any time using AI for coding, you've experienced this cycle: ask → get code → try to run → it fails → paste error → get fix → something else breaks → lather, rinse, repeat.
 
 Each iteration costs you time, context switching, and cognitive energy. The LLM itself never knows whether its output actually *works* — it just predicts tokens. It produces code, but it cannot *verify* code.
 
@@ -100,11 +100,11 @@ The first real version was the **Single Closed Loop** — and it looked like thi
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  Query                                                    │
-│    ↓                                                      │
-│  Refiner → Reasoner → Solver → Verifier → Evaluator      │
-│    ↑                                          │           │
-│    └────── score < threshold? ───────────────┘           │
+│  Query                                                  │
+│    ↓                                                    │
+│  Refiner → Reasoner → Solver → Verifier → Evaluator     │
+│    ↑                                         │          │
+│    └────── score < threshold? ───────────────┘          │
 └─────────────────────────────────────────────────────────┘
 ```
 
