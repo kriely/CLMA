@@ -282,7 +282,20 @@ AGENT_PROMPTS = {
             "or any blocking user-input calls. Use command-line arguments instead.\n"
             "Execution results (stdout, stderr, exit code) will be provided in subsequent contexts.\n"
             "Put code in markdown code blocks with language: ```python, ```bash, or ```cpp\n"
-            "Output ONLY the solution."
+            "Output ONLY the solution.\n"
+            "\n=== MULTI-FILE PROJECT TOOLS ===\n"
+            "You can create multi-file projects! Use these XML tags in your response:\n"
+            '<write_file path="filename.py">\n'
+            "... file content ...\n"
+            "</write_file>\n"
+            "Create as many files as needed. Paths are relative to the sandbox directory.\n"
+            "Directories are auto-created. After writing files, you can execute code as usual.\n"
+            'Example: <write_file path="src/module.py">\n'
+            "def greet(): print('hello')\n"
+            "</write_file>\n"
+            "Then in a ```python block: from src.module import greet\n"
+            "Files persist in the sandbox for the duration of this session.\n"
+            "=============================="
         ),
         "user": "Solve this problem:\n\nQuery: {query}\n\nReasoning: {reasoning}\n\n{similar_experiences}\n{execution_result}",
     },
@@ -401,6 +414,7 @@ class CLMAFramework:
         self._execution_timeout = 120
         self._tool_executor = ToolExecutor(sandbox_dir=tools_dir, timeout=self._execution_timeout)
         self._tool_results = []
+        self._sandbox_tool_results = []
 
         # Working memory for cross-agent context
         self._agent_memory = {}
@@ -1024,6 +1038,19 @@ rules:
 
                 # Post-processing: auto-execute code for solver
                 if agent_name == "solver" and result.success and result.content:
+                    # Step 1: Parse and execute multi-file tool tags
+                    tool_results = self._parse_and_execute_tools(result.content)
+                    if tool_results:
+                        self._sandbox_tool_results = self._sandbox_tool_results or []
+                        self._sandbox_tool_results.extend(tool_results)
+                        created = [t for t in tool_results if t.get("type") == "write_file" and t.get("success")]
+                        if created:
+                            result.content += (
+                                f"\n\n=== FILES CREATED ===\n"
+                                + "\n".join(f"  ✓ {t['path']} ({t['size']} chars)" for t in created)
+                                + "\n=== END FILES ===\n"
+                            )
+                    # Step 2: Execute code blocks as before
                     tool_result = self._auto_execute_code(result.content)
                     if tool_result:
                         self._tool_results.append(tool_result)
@@ -1084,21 +1111,58 @@ rules:
                 )
         return None
 
+    def _parse_and_execute_tools(self, content: str) -> list:
+        import re as _re
+        results = []
+        for match in _re.finditer(r'<write_file\s+path="([^"]+)"\s*>\n?(.*?)</write_file>', content, _re.DOTALL):
+            path = match.group(1).strip()
+            fc = match.group(2).strip('\n')
+            tr = self._tool_executor.write_file(path, fc)
+            results.append({"type": "write_file", "path": path, "size": len(fc), "success": tr.success, "message": tr.stdout or tr.stderr})
+        for match in _re.finditer(r'<list_files\s*(?:path="([^"]+)")?\s*/>', content):
+            path = match.group(1) if match.group(1) else "."
+            tr = self._tool_executor.list_files(path)
+            results.append({"type": "list_files", "path": path, "success": tr.success, "files": tr.stdout.split('\n') if tr.stdout else []})
+        return results
 
-
-
+    def _get_sandbox_files(self) -> list:
+        import os as _os
+        import re as _re
+        files = []
+        sandbox = self._tool_executor._sandbox_dir
+        for root, dirs, fnames in _os.walk(sandbox):
+            # Skip __pycache__ directories entirely
+            dirs[:] = [d for d in dirs if d != '__pycache__']
+            for fname in fnames:
+                # Skip auto-generated temp scripts (script_*.sh, script_*.py)
+                if _re.match(r'script_\d+\.(sh|py)$', fname):
+                    continue
+                full = _os.path.join(root, fname)
+                rel = _os.path.relpath(full, sandbox)
+                try:
+                    size = _os.path.getsize(full)
+                except OSError:
+                    size = 0
+                files.append({"path": rel, "size": size})
+        files.sort(key=lambda x: x["path"])
+        return files
 
     def process_query(self, query):
         """Process a query through the multi-agent pipeline."""
         # Clear cross-agent memory for fresh query
         self._agent_memory = {}
         self._tool_results = []
+        self._sandbox_tool_results = []
+        # Reset sandbox for fresh session
+        self._tool_executor.reset_sandbox()
         # Clear C++ execution history for session isolation
         self.orchestrator.clear_execution_history()
         result = self.orchestrator.process_query(query)
         formatted = self._format_result(result)
-        # Include tool execution results
+        # Include tool execution results and sandbox files
         formatted["tool_results"] = [tr.to_dict() for tr in self._tool_results]
+        formatted["sandbox_files"] = self._get_sandbox_files()
+        formatted["sandbox_tool_results"] = self._sandbox_tool_results
         formatted["tools_used"] = len(self._tool_results) > 0
         return formatted
 
@@ -1396,6 +1460,9 @@ rules:
         # --- Reset state for fresh query ---
         self._agent_memory = {}
         self._tool_results = []
+        self._sandbox_tool_results = []
+        # Reset sandbox for fresh session
+        self._tool_executor.reset_sandbox()
         # Clear C++ execution history for session isolation
         self.orchestrator.clear_execution_history()
         # Reset per-query token tracking
@@ -1565,6 +1632,7 @@ rules:
         has_any_content = bool(self._agent_memory.get("solver") or
                                self._agent_memory.get("verifier"))
 
+        sandbox_files = self._get_sandbox_files()
         final_result = {
             "success": True if has_any_content else False,
             "cancelled": True,
@@ -1575,6 +1643,7 @@ rules:
             "best_score": best_score,
             "tool_results": [tr.to_dict() for tr in self._tool_results],
             "tools_used": len(self._tool_results) > 0,
+            "sandbox_files": sandbox_files,
         }
 
         total_tokens = max(self._stream_token_usage, 0)
@@ -1594,6 +1663,7 @@ rules:
             "event": "done",
             "result": final_result,
             "history": all_iterations,
+            "sandbox_files": sandbox_files,
             "stats": stats,
             "mode": mode,
             "session_id": session_id,
@@ -1740,9 +1810,16 @@ rules:
 
                     # Auto-execute for solver
                     if i_agent == "solver" and agent_result.success and agent_result.content:
+                        # Parse and execute write_file / list_file tags
+                        inner_tool_results_local = self._parse_and_execute_tools(agent_result.content)
+                        if inner_tool_results_local:
+                            inner_tool_results.extend(inner_tool_results_local)
+                            self._sandbox_tool_results.extend(inner_tool_results_local)
+                        # Auto-execute code blocks
                         tr = self._auto_execute_code(agent_result.content)
                         if tr:
                             inner_tool_results.append(tr)
+                            self._tool_results.append(tr)
                             agent_result.content += (
                                 f"\n\n=== EXECUTION OUTPUT ===\n✓ Success: {tr.success}\n"
                                 f"Exit code: {tr.exit_code}\nStdout:\n{tr.stdout}\n=== END EXECUTION OUTPUT ==="
@@ -2039,6 +2116,7 @@ rules:
             "mode": "multi_loop",
             "tool_results": [tr.to_dict() for tr in self._tool_results],
             "tools_used": len(self._tool_results) > 0,
+            "sandbox_files": self._get_sandbox_files(),
         }
         stats = {
             "queries_processed": 1,
@@ -2069,6 +2147,7 @@ rules:
             "event": "done",
             "result": final_result,
             "history": all_outer_iterations,
+            "sandbox_files": self._get_sandbox_files(),
             "stats": stats,
             "mode": self.get_mode(),  # actual mode (closed/open), not execution mode
             "arch_mode": "multi",
@@ -2196,6 +2275,24 @@ rules:
 
             # Auto-execute code for solver
             if agent_name == "solver" and result.success and result.content:
+                # Step 1: Parse and execute multi-file tool tags (<write_file>, <list_files>)
+                import logging as _lg
+                _lg.info(f"[TRACE_SOLVER] _run_agent L2260: solver content starts with: {result.content[:100]}")
+                tool_results = self._parse_and_execute_tools(result.content)
+                _lg.info(f"[TRACE_SOLVER] _parse_and_execute_tools returned {len(tool_results)} results")
+                if tool_results:
+                    self._sandbox_tool_results = self._sandbox_tool_results or []
+                    self._sandbox_tool_results.extend(tool_results)
+                    created = [t for t in tool_results if t.get("type") == "write_file" and t.get("success")]
+                    _lg.info(f"[TRACE_SOLVER] created {len(created)} files")
+                    if created:
+                        result.content += (
+                            f"\n\n=== FILES CREATED ===\n"
+                            + "\n".join(f"  ✓ {t['path']} ({t['size']} chars)" for t in created)
+                            + "\n=== END FILES ===\n"
+                        )
+                        _lg.info(f"[TRACE_SOLVER] appended FILES CREATED, content now ends: ...{result.content[-100:]}")
+                # Step 2: Execute code blocks
                 tool_result = self._auto_execute_code(result.content)
                 if tool_result:
                     self._tool_results.append(tool_result)
@@ -2234,6 +2331,18 @@ rules:
                 }
                 solver_result = self._llm_agent_call("solver", query, "code_generation", solver_ctx)
                 dag_complete_content = solver_result.content
+                # Parse and execute multi-file tool tags (<write_file>, <list_files>)
+                tool_results = self._parse_and_execute_tools(dag_complete_content) if dag_complete_content else []
+                if tool_results:
+                    self._sandbox_tool_results = self._sandbox_tool_results or []
+                    self._sandbox_tool_results.extend(tool_results)
+                    created = [t for t in tool_results if t.get("type") == "write_file" and t.get("success")]
+                    if created:
+                        dag_complete_content += (
+                            f"\n\n=== FILES CREATED ===\n"
+                            + "\n".join(f"  ✓ {t['path']} ({t['size']} chars)" for t in created)
+                            + "\n=== END FILES ===\n"
+                        )
                 tool_result = self._auto_execute_code(dag_complete_content)
                 execution_success = tool_result and tool_result.success
                 execution_stdout = tool_result.stdout if tool_result else ""
@@ -2265,6 +2374,7 @@ rules:
                                   "executability": dag_executability, "satisfaction": dag_satisfaction},
                     },
                     "history": [],
+                    "sandbox_files": self._get_sandbox_files(),
                     "stats": {"mode": "dag", "total_tasks": 1, "completed_tasks": 1, "failed_tasks": 0,
                               "total_iterations": 1, "dag_auto_downgraded": "false", "fast_path": True},
                     "mode": "dag",
@@ -2367,6 +2477,7 @@ rules:
                         },
                     },
                     "history": [],
+                    "sandbox_files": self._get_sandbox_files(),
                     "stats": dag_stats,
                     "mode": "dag",
                     "session_id": session_id,
@@ -2618,7 +2729,14 @@ rules:
                 "best_score": best_score,
                 "tool_results": [tr.to_dict() for tr in self._tool_results],
                 "tools_used": len(self._tool_results) > 0,
+                "sandbox_files": self._get_sandbox_files(),
             }
+            import logging as _lg2
+            _lg2.info(f"[TRACE_FINAL] final_content[:200]: {final_content[:200]}")
+            _lg2.info(f"[TRACE_FINAL] '=== FILES CREATED ===' in final_content: {'=== FILES CREATED ===' in final_content}")
+            _lg2.info(f"[TRACE_FINAL] sandbox_files in final_result: {'sandbox_files' in final_result}")
+            sandbox_f = final_result.get("sandbox_files", [])
+            _lg2.info(f"[TRACE_FINAL] sandbox_files count: {len(sandbox_f)}")
 
             total_tokens = max(self._stream_token_usage, 0)
             stats = {
@@ -2649,6 +2767,7 @@ rules:
                 "event": "done",
                 "result": final_result,
                 "history": all_iterations,
+                "sandbox_files": self._get_sandbox_files(),
                 "stats": stats,
                 "mode": mode,
                 "session_id": session_id,
@@ -2920,6 +3039,7 @@ rules:
                 "cancelled": True,
                 "content": partial_result or "[Cancelled] AAN processing stopped by user.",
                 "score": partial_scores,
+                "sandbox_files": self._get_sandbox_files(),
             },
             "history": [],
             "stats": {
@@ -3049,33 +3169,72 @@ rules:
         except Exception:
             pass
 
-        # 复杂度预判 — 使用语义有效长度（中文信息密度约1.5倍英文）
+        # === 复杂度评分系统（关键词 + 长度加权） ===
         qlen = len(query)
         cjk_count = sum(1 for c in query if '\u4e00' <= c <= '\u9fff')
-        effective_len = qlen + cjk_count  # 每个中文字符等额加权
+        effective_len = qlen + cjk_count  # 中文加权
 
-        # 关键词检测
-        has_parallel_keywords = any(kw in query for kw in ["分别", "多个", "同时", "parallel", "concurrent", "both", "and also"])
-        has_tree_keywords = any(kw in query for kw in ["架构", "系统", "module", "component", "分层", "子系统", "framework", "service"])
-        has_complex_keywords = any(kw in query for kw in ["分布式", "database", "server", "client", "network", "protocol", "engine"])
+        complexity_score = 0.0
 
-        # 代码意图检测：即使短查询也需完整 pipeline
-        has_code_intent = any(kw in query for kw in ["写", "实现", "优化", "重构", "设计", "构建", "实现", "implement", "write", "code", "refactor", "optimize", "build", "design"])
+        # 1. 长度因子：查询越长越可能复杂
+        if effective_len < 10:
+            complexity_score += 0   # 极短
+        elif effective_len < 20:
+            complexity_score += 5   # 短
+        elif effective_len < 40:
+            complexity_score += 15  # 中等
+        elif effective_len < 80:
+            complexity_score += 30  # 较长
+        else:
+            complexity_score += 50  # 很长
 
-        # 真正的 trivial 查询（无代码意图 + 极短）
-        is_trivial = effective_len < 15 and not has_code_intent and not has_complex_keywords and not has_tree_keywords
+        # 2. 结构复杂度：换行/标点/列表
+        has_multiline = query.count('\n') >= 2
+        has_bullets = '1.' in query or '-' in query or '*' in query
+        has_conditions = any(kw in query for kw in ['如果', '当', '若', 'if', 'when', 'unless', 'except', '否则', 'else'])
+        has_steps = any(kw in query for kw in ['先', '再', '然后', '步骤', 'first', 'then', 'next', 'step'])
+        if has_multiline: complexity_score += 15
+        if has_bullets: complexity_score += 5
+        if has_conditions: complexity_score += 10
+        if has_steps: complexity_score += 10
 
-        if is_trivial:
-            # 真正的简单查询：直接模式
+        # 3. 并行/并发信号
+        has_parallel_keywords = any(kw in query for kw in ["分别", "多个", "同时", "parallel", "concurrent", "both", "and also", "各", "每", "分别对"])
+        if has_parallel_keywords: complexity_score += 25
+
+        # 4. 架构/系统信号
+        has_arch_keywords = any(kw in query for kw in ["架构", "系统", "module", "component", "分层", "子系统", "framework", "service", "微服务", "模块", "架构设计"])
+        if has_arch_keywords: complexity_score += 30
+
+        # 5. 网络/分布式/协议信号
+        has_network_keywords = any(kw in query for kw in ["网络", "分布式", "database", "server", "client", "protocol", "engine", "TCP", "UDP", "HTTP", "socket", "并发", "多线程"])
+        if has_network_keywords: complexity_score += 25
+
+        # 6. 代码意图 — 不再阻断 direct，而是累积
+        has_code_intent = any(kw in query for kw in ["写", "实现", "优化", "重构", "设计", "构建", "implement", "write", "code", "refactor", "create", "build", "generate", "输出", "生成"])
+        if has_code_intent: complexity_score += 3  # 低权重，仅作参考
+
+        # 7. 文件操作信号 — 如果没有其他复杂信号，单纯的文件操作走 direct
+        has_file_op = any(kw in query for kw in ["文件", "file", "py", ".py", "创建", "输出到", "保存", "save", "output"])
+        if has_file_op and not has_arch_keywords and not has_network_keywords and effective_len < 60:
+            complexity_score -= 10  # 降低复杂度，导向 direct
+
+        # === 复杂度分级决策 ===
+        # 20以下 → direct（简单查询 / 简单代码任务）
+        # 20-40 → chain（中等复杂度，需要多 agent 协作）
+        # 40+  → parallel 或 tree（复杂任务）
+        if complexity_score <= 20:
+            # 极简任务：direct 模式
+            complexity_label = "simple"
             topology = {
                 "type": "direct",
                 "modules": ["solver"],
                 "complexity": "simple",
                 "method": method,
-                "reasoning": "trivial: direct solver → evaluator",
+                "reasoning": f"simple (score={complexity_score}): direct solver → evaluator",
             }
-        elif has_parallel_keywords and effective_len > 50:
-            # 有并行标记 + 够长 → 并行森林
+        elif has_parallel_keywords and effective_len > 40:
+            # 有并行标记 + 够复杂 → 并行森林
             modules = self._infer_modules(query)
             topology = {
                 "type": "parallel",
@@ -3083,9 +3242,9 @@ rules:
                 "complexity": "medium",
                 "method": method,
                 "parallel_groups": [modules] if modules else [["solver"]],
-                "reasoning": f"parallel: {len(modules) if modules else 1} modules",
+                "reasoning": f"parallel (score={complexity_score}): {len(modules) if modules else 1} modules",
             }
-        elif has_tree_keywords or (has_complex_keywords and effective_len > 100):
+        elif has_arch_keywords or (has_network_keywords and effective_len > 60):
             # 复杂架构 → 树状分解
             modules = self._infer_modules(query)
             topology = {
@@ -3093,16 +3252,16 @@ rules:
                 "modules": modules if modules else ["solver"],
                 "complexity": "complex",
                 "method": method,
-                "reasoning": f"tree: {len(modules) if modules else 1} sub-modules",
+                "reasoning": f"tree (score={complexity_score}): {len(modules) if modules else 1} sub-modules",
             }
         else:
-            # 默认：链式（涵盖大多数日常查询）
+            # 默认：链式
             topology = {
                 "type": "chain",
                 "modules": ["refiner", "reasoner", "solver", "verifier", "evaluator"],
                 "complexity": "medium",
                 "method": method,
-                "reasoning": "chain: refiner → reasoner → solver → verifier → evaluator",
+                "reasoning": f"chain (score={complexity_score}): refiner → reasoner → solver → verifier → evaluator",
             }
 
         # 记录 Router 耗时到 _agent_memory（供其他 agent 使用）
@@ -3166,7 +3325,56 @@ rules:
             "timestamp": time.time(),
         }
 
-        # Auto-execute
+        # Parse and execute multi-file tool tags (<write_file>, <list_files>)
+        tool_results = self._parse_and_execute_tools(result.content) if result.content else []
+        has_tool_files = False
+        if tool_results:
+            self._sandbox_tool_results = self._sandbox_tool_results or []
+            self._sandbox_tool_results.extend(tool_results)
+            created = [t for t in tool_results if t.get("type") == "write_file" and t.get("success")]
+            if created:
+                has_tool_files = True
+                result.content += (
+                    f"\n\n=== FILES CREATED ===\n"
+                    + "\n".join(f"  ✓ {t['path']} ({t['size']} chars)" for t in created)
+                    + "\n=== END FILES ===\n"
+                )
+
+        # If no <write_file> tags found but code blocks exist,
+        # auto-save code blocks as sandbox files for file-oriented queries
+        if not has_tool_files and result.content:
+            import re as _re3
+            # Detect if user asked for file output
+            _file_op_query = any(kw in query.lower() for kw in ["输出", "保存", "文件", "file", ".py", ".sh", ".js", "生成.*文件"])
+            # Find all code blocks and save them as files in the sandbox
+            _code_blocks = list(_re3.finditer(r'```(\w+)\s*\n(.*?)```', result.content, _re3.DOTALL))
+            if _file_op_query and _code_blocks:
+                _ext_map = {"python": "py", "py": "py", "bash": "sh", "shell": "sh", "sh": "sh",
+                            "cpp": "cpp", "c++": "cpp", "javascript": "js", "js": "js",
+                            "html": "html", "css": "css", "json": "json", "yaml": "yaml", "yml": "yml"}
+                _saved_files = []
+                for _i, _m in enumerate(_code_blocks):
+                    _lang = _m.group(1).lower()
+                    _code = _m.group(2).strip()
+                    if not _code:
+                        continue
+                    _ext = _ext_map.get(_lang, "txt")
+                    # Derive filename from query if possible
+                    _fname = f"output_{_i+1}.{_ext}"
+                    _tr = self._tool_executor.write_file(_fname, _code)
+                    if _tr.success:
+                        _saved_files.append(_fname)
+                        tool_results.append({"type": "write_file", "path": _fname, "size": len(_code), "success": True})
+                if _saved_files:
+                    self._sandbox_tool_results = self._sandbox_tool_results or []
+                    self._sandbox_tool_results.extend(tool_results)
+                    result.content += (
+                        f"\n\n=== FILES CREATED ===\n"
+                        + "\n".join(f"  ✓ {f}" for f in _saved_files)
+                        + "\n=== END FILES ===\n"
+                    )
+
+        # Auto-execute code blocks
         tool_result = self._auto_execute_code(result.content) if result.content else None
         if tool_result:
             self._tool_results.append(tool_result)
@@ -3185,8 +3393,10 @@ rules:
                 "success": True,
                 "content": final_content,
                 "score": score,
+                "sandbox_files": self._get_sandbox_files(),
             },
             "history": [],
+            "sandbox_files": self._get_sandbox_files(),
             "stats": {
                 "mode": "adaptive_direct",
                 "total_iterations": 1,
@@ -3315,6 +3525,19 @@ rules:
                 if agent_name == "solver":
                     final_content = result.content or ""
                     if result.success and result.content:
+                        # Step 1: Parse and execute multi-file tool tags
+                        tool_results = self._parse_and_execute_tools(result.content)
+                        if tool_results:
+                            self._sandbox_tool_results = self._sandbox_tool_results or []
+                            self._sandbox_tool_results.extend(tool_results)
+                            created = [t for t in tool_results if t.get("type") == "write_file" and t.get("success")]
+                            if created:
+                                result.content += (
+                                    f"\n\n=== FILES CREATED ===\n"
+                                    + "\n".join(f"  ✓ {t['path']} ({t['size']} chars)" for t in created)
+                                    + "\n=== END FILES ===\n"
+                                )
+                        # Step 2: Execute code blocks
                         tr = self._auto_execute_code(result.content)
                         if tr:
                             self._tool_results.append(tr)
@@ -3402,8 +3625,10 @@ rules:
                 "iterations": all_iterations,
                 "total_iterations": iteration,
                 "best_score": best_score,
+                "sandbox_files": self._get_sandbox_files(),
             },
             "history": [],
+            "sandbox_files": self._get_sandbox_files(),
             "stats": {
                 "mode": "adaptive_chain",
                 "total_iterations": iteration,
@@ -3458,6 +3683,18 @@ rules:
                 f"{query}\n\nFocus on: {module_desc}",
                 method, ctx
             )
+            # Parse and execute multi-file tool tags (<write_file>)
+            tool_results = self._parse_and_execute_tools(agent_result.content) if agent_result.content else []
+            if tool_results:
+                self._sandbox_tool_results = self._sandbox_tool_results or []
+                self._sandbox_tool_results.extend(tool_results)
+                created = [t for t in tool_results if t.get("type") == "write_file" and t.get("success")]
+                if created:
+                    agent_result.content += (
+                        f"\n\n=== FILES CREATED ===\n"
+                        + "\n".join(f"  ✓ {t['path']} ({t['size']} chars)" for t in created)
+                        + "\n=== END FILES ===\n"
+                    )
             # Auto-execute if code was generated
             tr = (self._auto_execute_code(agent_result.content)
                   if agent_result.content else None)
@@ -3577,8 +3814,10 @@ rules:
                 "content": merged_content,
                 "score": scores,
                 "module_results": module_results,
+                "sandbox_files": self._get_sandbox_files(),
             },
             "history": [],
+            "sandbox_files": self._get_sandbox_files(),
             "stats": {
                 "mode": "adaptive_parallel",
                 "total_iterations": 1,
@@ -3711,8 +3950,10 @@ rules:
                 "content": merged_content,
                 "score": scores,
                 "module_results": merged_results,
+                "sandbox_files": self._get_sandbox_files(),
             },
             "history": [],
+            "sandbox_files": self._get_sandbox_files(),
             "stats": {
                 "mode": "adaptive_tree",
                 "total_iterations": len(modules),

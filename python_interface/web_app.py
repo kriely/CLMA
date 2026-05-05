@@ -5,7 +5,8 @@ import os
 import sys
 import json
 import threading
-from flask import Flask, render_template, request, jsonify, stream_with_context, Response
+APP_VERSION = 'v25'
+from flask import Flask, render_template, request, jsonify, stream_with_context, Response, send_file
 
 # Ensure we can find our package
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -17,6 +18,10 @@ from api_providers import (
 )
 # LLM Catalog (dynamic provider directory)
 import copy as _copy
+
+import logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
@@ -385,6 +390,9 @@ def api_process_stream():
                     scores = result.get('score', {})
                     stats = event.get('stats', {})
                     mode = event.get('mode', 'closed')
+                    import logging as _lg3
+                    _lg3.info(f"[TRACE_ADD_MSG] result keys: {list(result.keys()) if isinstance(result, dict) else 'not dict'}")
+                    _lg3.info(f"[TRACE_ADD_MSG] sandbox_files in result: {result.get('sandbox_files', 'NO') if isinstance(result, dict) else 'N/A'}")
                     add_message(
                         session_id=sid,
                         query=query,
@@ -393,8 +401,9 @@ def api_process_stream():
                         stats=stats,
                         mode=mode,
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    import logging as _lg4
+                    _lg4.exception(f"[TRACE_ADD_MSG] EXCEPTION in add_message: {e}")
             yield f"event: {event['event']}\ndata: {json.dumps(event)}\n\n"
 
     return Response(
@@ -504,12 +513,15 @@ _tool_lock = threading.Lock()
 
 
 def get_tool_executor():
-    """Lazy initialize the tool executor singleton."""
+    """Lazy initialize the tool executor singleton.
+    Uses the same sandbox directory as the CLMA engine (tools/sandbox/)."""
     global _tool_executor
     if _tool_executor is None:
         with _tool_lock:
             if _tool_executor is None:
-                _tool_executor = ToolExecutor()
+                base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                sandbox_dir = os.path.join(base_dir, "tools", "sandbox")
+                _tool_executor = ToolExecutor(sandbox_dir=sandbox_dir)
     return _tool_executor
 
 
@@ -574,6 +586,65 @@ def api_tools_sandbox_files():
         return jsonify({'files': [], 'error': result.stderr})
     files = [f.strip() for f in result.stdout.strip().split('\n') if f.strip()]
     return jsonify({'files': files, 'count': len(files), 'sandbox_path': te.get_sandbox_path()})
+
+
+@app.route('/api/tools/sandbox/read')
+def api_tools_sandbox_read():
+    """Read a file from the sandbox directory."""
+    path = request.args.get('path', '')
+    if not path:
+        return jsonify({'error': 'path parameter required'}), 400
+    # Normalize: strip leading ./ if present
+    path = path.lstrip('./')
+    te = get_tool_executor()
+    result = te.read_file(path)
+    if not result.success:
+        return jsonify({'error': result.stderr}), 404
+    return jsonify({
+        'path': path,
+        'content': result.stdout,
+        'size': len(result.stdout),
+    })
+
+
+@app.route('/api/tools/sandbox/download')
+def api_tools_sandbox_download():
+    """Download a single file from the sandbox."""
+    path = request.args.get('path', '')
+    if not path:
+        return jsonify({'error': 'path parameter required'}), 400
+    path = path.lstrip('./')
+    te = get_tool_executor()
+    safe_path = te._resolve_sandbox_path(path)
+    if safe_path is None or not os.path.isfile(safe_path):
+        return jsonify({'error': 'File not found'}), 404
+    return send_file(
+        safe_path,
+        as_attachment=True,
+        download_name=os.path.basename(path),
+    )
+
+
+@app.route('/api/tools/sandbox/download-all')
+def api_tools_sandbox_download_all():
+    """Download the entire sandbox as a ZIP archive."""
+    import io, zipfile
+    te = get_tool_executor()
+    sandbox = te._sandbox_dir
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for root, dirs, fnames in os.walk(sandbox):
+            dirs[:] = [d for d in dirs if d != '__pycache__']
+            for fname in fnames:
+                full = os.path.join(root, fname)
+                rel = os.path.relpath(full, sandbox)
+                zf.write(full, rel)
+    buf.seek(0)
+    return Response(
+        buf.getvalue(),
+        mimetype='application/zip',
+        headers={'Content-Disposition': 'attachment; filename=sandbox.zip'},
+    )
 
 
 @app.route('/api/tools/docker/info')

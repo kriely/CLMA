@@ -2504,3 +2504,241 @@ body {
   color: #d4a017;
 }
 
+/* === File Tree (Minimalist Line-art) === */
+.file-tree {
+  margin: 12px 0;
+  padding: 12px 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.8;
+  overflow-x: auto;
+}
+
+.file-tree-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-color);
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* ── Tree lines ── */
+.file-tree .tree-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 0;
+  color: var(--text-primary);
+  cursor: default;
+  white-space: nowrap;
+}
+
+.file-tree .tree-item:hover {
+  background: var(--bg-card-hover);
+  border-radius: 4px;
+}
+
+/* Lines-only connector (pure CSS, no emoji) */
+.file-tree .tree-item .icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  color: var(--text-muted);
+}
+
+/* Folder line-art icon: ──▸  or just vertical lines */
+.file-tree .tree-item .icon.folder::before {
+  content: '';
+  display: inline-block;
+  width: 12px;
+  height: 10px;
+  border: 1.5px solid var(--text-muted);
+  border-radius: 2px;
+  position: relative;
+}
+.file-tree .tree-item .icon.folder::after {
+  content: '';
+  position: absolute;
+  top: -3px;
+  left: 3px;
+  width: 6px;
+  height: 3px;
+  background: var(--text-muted);
+  border-radius: 1px 1px 0 0;
+}
+.file-tree .tree-item .icon.folder {
+  position: relative;
+}
+
+/* File line-art icon: simple document */
+.file-tree .tree-item .icon.file::before {
+  content: '';
+  display: inline-block;
+  width: 10px;
+  height: 12px;
+  border: 1.5px solid var(--text-muted);
+  border-radius: 1px;
+}
+.file-tree .tree-item .icon.file::after {
+  content: '';
+  position: absolute;
+  bottom: 1px;
+  right: 1px;
+  width: 4px;
+  height: 4px;
+  border: 1.5px solid var(--text-muted);
+  border-radius: 50%;
+}
+.file-tree .tree-item .icon.file {
+  position: relative;
+}
+
+/* Clickable file name */
+.file-tree .tree-item .file-name {
+  color: var(--accent-1);
+  cursor: pointer;
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: border-color 0.15s;
+}
+.file-tree .tree-item .file-name:hover {
+  border-bottom-color: var(--accent-1);
+}
+
+/* File size badge */
+.file-tree .tree-item .file-size {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font);
+}
+
+/* Download button (per file) */
+.btn-download-file {
+  display: none;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 4px;
+  margin-left: 4px;
+  color: var(--text-muted);
+  border-radius: 3px;
+  line-height: 1;
+  flex-shrink: 0;
+  transition: color 0.15s, background 0.15s;
+}
+.btn-download-file:hover {
+  color: var(--accent-1);
+  background: var(--bg-card-hover);
+}
+.file-tree .tree-item:hover .btn-download-file {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* Download All button (header) */
+.btn-download-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  background: none;
+  border: 1px solid var(--border-color);
+  cursor: pointer;
+  padding: 4px 8px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-family: var(--font);
+  border-radius: 4px;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 400;
+}
+.btn-download-all:hover {
+  color: var(--accent-1);
+  border-color: var(--accent-1);
+  background: var(--bg-card-hover);
+}
+
+/* Indentation guides */
+.file-tree .indent {
+  display: inline-block;
+  width: 20px;
+  border-left: 1px solid var(--border-color);
+  height: 1px;
+  margin-right: 8px;
+}
+
+/* File preview panel */
+.file-preview {
+  margin: 8px 0;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.file-preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border-color);
+  font-size: 12px;
+  font-family: var(--font);
+  color: var(--text-secondary);
+}
+.file-preview-header .close-btn {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 4px;
+  border: none;
+  background: none;
+}
+.file-preview-header .close-btn:hover {
+  color: var(--accent-5);
+}
+.file-preview-body {
+  padding: 12px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  overflow-x: auto;
+  max-height: 400px;
+  overflow-y: auto;
+}
+.file-preview-body pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* === Day theme adjustments for file tree === */
+[data-theme="day"] .file-tree {
+  background: var(--bg-card);
+}
+[data-theme="day"] .file-tree .tree-item .icon.folder::before,
+[data-theme="day"] .file-tree .tree-item .icon.file::before {
+  border-color: var(--text-muted);
+}
+[data-theme="day"] .file-preview {
+  background: var(--bg-primary);
+}
+

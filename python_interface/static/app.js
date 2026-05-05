@@ -176,6 +176,9 @@ async function submitQuery() {
   document.getElementById('toolResultsCount').textContent = '0';
   document.getElementById('toolResultsPanel').classList.add('hidden');
   renderTimeline([]);
+  // Remove stale file tree from previous session
+  var _oldTree = document.getElementById('fileTreeContainer');
+  if (_oldTree) _oldTree.remove();
 
   // Reset result status
   const statusEl = document.getElementById('resultStatus');
@@ -333,25 +336,6 @@ async function submitQuery() {
       accumulatedResult = data.result || {};
       const scores = accumulatedResult.score || { overall: 0 };
 
-      // ========== DEBUG: log key values ==========
-      var _dbg = document.getElementById('_debugPanel') || (function(){
-        var p = document.createElement('div');
-        p.id = '_debugPanel';
-        p.style.cssText = 'position:fixed;bottom:0;right:0;z-index:9999;background:#1a1a2e;color:#0f0;padding:10px;font:11px monospace;max-height:200px;overflow:auto;border:2px solid #ff0;max-width:400px';
-        document.body.appendChild(p);
-        return p;
-      })();
-      function _dbgLog(msg) {
-        var t = new Date().toLocaleTimeString('zh-CN', {hour12:false}) + '.' + Date.now().toString().slice(-3);
-        _dbg.innerHTML = '[' + t + '] ' + msg + '<br>' + _dbg.innerHTML;
-        if (_dbg.children.length > 20) _dbg.removeChild(_dbg.lastChild);
-        console.log('[DONE-DBG]', msg);
-      }
-      _dbgLog('DONE event received');
-      _dbgLog('data.session_id=' + (data.session_id || 'undefined'));
-      _dbgLog('accumulatedResult keys=' + Object.keys(accumulatedResult).join(','));
-      // ==========================================
-
       drawGauge(scores.overall);
       animateBar('scoreBar1', 'scoreVal1', scores.reasonableness || 0);
       animateBar('scoreBar2', 'scoreVal2', scores.executability || 0);
@@ -372,6 +356,9 @@ async function submitQuery() {
       const output = document.getElementById('outputContent');
       output.textContent = accumulatedResult.content || '[No output]';
 
+      // Render file tree if sandbox_files present
+      injectFileTreeAfterOutput(data);
+
       if (data.stats) updateStats(data.stats);
       if (data.mode) updateMode(data.mode);
       renderTimeline(data.history || []);
@@ -385,16 +372,23 @@ async function submitQuery() {
         activeEventSource = null;
       }
       setTimeout(function() {
-        _dbgLog('before refreshSessionList(): currentSessionId=' + currentSessionId + ', listChildren=' + document.getElementById('sessionList').children.length);
-        refreshSessionList().then(function() {
-          var nChildren = document.getElementById('sessionList').children.length;
-          var sidEl = currentSessionId ? document.querySelector('[data-sid="' + currentSessionId + '"]') : null;
-          _dbgLog('AFTER refreshSessionList(): listChildren=' + nChildren + ', sidEl=' + (sidEl ? 'FOUND' : 'NOT_FOUND'));
+        try {
+          refreshSessionList().then(function() {
+            processing = false;
+            btn.disabled = false;
+            btn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg> Execute';
+          }).catch(function(err) {
+            console.warn('refreshSessionList failed:', err);
+            processing = false;
+            btn.disabled = false;
+            btn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg> Execute';
+          });
+        } catch(e) {
+          console.error('setTimeout callback error:', e);
           processing = false;
           btn.disabled = false;
           btn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg> Execute';
-          _dbgLog('DONE handler fully complete ✓');
-        });
+        }
       }, 50);
     });
 
@@ -526,6 +520,9 @@ async function submitQuery() {
       const output = document.getElementById('outputContent');
       output.textContent = accumulatedResult.content || '[No output]';
 
+      // Render file tree if sandbox_files present
+      injectFileTreeAfterOutput(data);
+
       if (data.stats) updateStats(data.stats);
       if (data.mode) updateMode(data.mode);
       renderTimeline(data.history || []);
@@ -540,6 +537,10 @@ async function submitQuery() {
       }
       setTimeout(function() {
         refreshSessionList().then(function() {
+          processing = false;
+          btn.disabled = false;
+          btn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg> Execute';
+        }).catch(function(err) {
           processing = false;
           btn.disabled = false;
           btn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg> Execute';
@@ -684,6 +685,11 @@ async function submitQuery() {
 
       const output = document.getElementById('outputContent');
       output.textContent = accumulatedResult.content || '[No output]';
+
+      // Render file tree if sandbox_files present
+      injectFileTreeAfterOutput(data);
+      // Force reflow to ensure file tree renders immediately
+      void(document.body.offsetHeight);
 
       if (data.stats) updateStats(data.stats);
       if (data.mode) updateMode(data.mode);
@@ -2902,6 +2908,23 @@ async function loadSession(sessionId) {
       const output = document.getElementById('outputContent');
       output.textContent = result.content || '[No output]';
 
+      // Render file tree if sandbox_files present in the session
+      var sandboxFiles = result.sandbox_files || last.sandbox_files;
+      if (sandboxFiles && sandboxFiles.length > 0) {
+        var treeId = 'fileTreeContainer';
+        var treeContainer = document.getElementById(treeId);
+        if (!treeContainer) {
+          treeContainer = document.createElement('div');
+          treeContainer.id = treeId;
+          output.parentNode.insertBefore(treeContainer, output.nextSibling);
+        }
+        renderFileTree(treeContainer, sandboxFiles, sessionId);
+      } else {
+        // Remove any stale file tree container
+        var stale = document.getElementById('fileTreeContainer');
+        if (stale) stale.remove();
+      }
+
       // Timeline — try history from result.iterations, _saved_history, or the session message's own history
       const history = result.iterations || result._saved_history || last.history || [];
       renderTimeline(history);
@@ -4034,4 +4057,227 @@ function applyThemeToCanvasElements() {
     document.documentElement.setAttribute('data-theme', 'day');
   }
 })();
+
+// === File Tree Utilities ===
+
+/**
+ * Render a file tree from sandbox_files array into a container element.
+ * @param {HTMLElement} container - element to render into
+ * @param {Array} files - [{path: "src/foo.py", size: 123}, ...]
+ * @param {string} sessionId - used to fetch file contents via API
+ */
+function renderFileTree(container, files, sessionId) {
+  if (!files || files.length === 0) {
+    container.innerHTML = '';
+    return;
+  }
+
+  // Build tree structure from flat paths
+  var tree = { _files: [], _dirs: {} };
+  files.forEach(function(f) {
+    var parts = f.path.split('/');
+    var node = tree;
+    for (var i = 0; i < parts.length; i++) {
+      var part = parts[i];
+      var isLast = (i === parts.length - 1);
+      if (isLast) {
+        node._files.push({ name: part, path: f.path, size: f.size });
+      } else {
+        if (!node._dirs[part]) {
+          node._dirs[part] = { _files: [], _dirs: {} };
+        }
+        node = node._dirs[part];
+      }
+    }
+  });
+
+  var html = '<div class="file-tree">';
+  html += '<div class="file-tree-header">';
+  html += '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
+  html += 'Project Files (' + files.length + ')';
+  html += '<button class="btn-download-all" title="Download all as ZIP" onclick="downloadAllSandbox()">' +
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>' +
+    ' Download All' +
+  '</button>';
+  html += '</div>';
+  html += _renderTreeNode(tree, '');
+  html += '</div>';
+
+  container.innerHTML = html;
+
+  // Attach click handlers for file previews
+  container.querySelectorAll('.file-name').forEach(function(el) {
+    el.addEventListener('click', function(e) {
+      var path = this.getAttribute('data-path');
+      if (!path) return;
+      fetchFilePreview(path, container, sessionId);
+    });
+  });
+}
+
+function _renderTreeNode(node, indentClass) {
+  var html = '';
+
+  // Sort: dirs first, then files, alphabetically
+  var dirNames = Object.keys(node._dirs).sort();
+  var fileNames = node._files.sort(function(a, b) { return a.name.localeCompare(b.name); });
+
+  dirNames.forEach(function(dirName) {
+    var dir = node._dirs[dirName];
+    html += '<div class="tree-item">';
+    if (indentClass) html += '<span class="' + indentClass + '"></span>';
+    html += '<span class="icon folder"></span>';
+    html += '<span>' + dirName + '/</span>';
+    html += '</div>';
+    html += _renderTreeNode(dir, indentClass ? indentClass : 'indent');
+  });
+
+  fileNames.forEach(function(f) {
+    html += '<div class="tree-item">';
+    if (indentClass) html += '<span class="' + indentClass + '"></span>';
+    html += '<span class="icon file"></span>';
+    html += '<span class="file-name" data-path="' + f.path + '">' + f.name + '</span>';
+    if (f.size !== undefined) {
+      html += '<span class="file-size">' + _formatSize(f.size) + '</span>';
+    }
+    html += '<button class="btn-download-file" title="Download ' + f.name + '" onclick="event.stopPropagation(); downloadSandboxFile(\'' + f.path.replace(/'/g, "\\'") + '\')">' +
+      '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>' +
+    '</button>';
+    html += '</div>';
+  });
+
+  return html;
+}
+
+function _formatSize(bytes) {
+  if (bytes < 1000) return bytes + 'B';
+  if (bytes < 1000000) return (bytes / 1000).toFixed(1) + 'KB';
+  return (bytes / 1000000).toFixed(1) + 'MB';
+}
+
+/**
+ * Fetch file content via API and show preview panel below the tree.
+ */
+function fetchFilePreview(path, treeContainer, sessionId) {
+  // Remove any existing preview
+  var existing = treeContainer.querySelector('.file-preview');
+  if (existing) existing.remove();
+
+  // Binary file extensions that can't be previewed as text
+  var binaryExts = ['.pyc', '.pyo', '.so', '.dll', '.dylib', '.o', '.a', '.class',
+                    '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico', '.svg',
+                    '.zip', '.tar', '.gz', '.bz2', '.7z', '.rar',
+                    '.mp3', '.mp4', '.wav', '.ogg', '.mov', '.avi',
+                    '.pdf', '.doc', '.docx', '.xls', '.xlsx',
+                    '.bin', '.dat', '.db', '.sqlite'];
+  var isBinary = false;
+  for (var i = 0; i < binaryExts.length; i++) {
+    if (path.endsWith(binaryExts[i])) { isBinary = true; break; }
+  }
+
+  var previewDiv = document.createElement('div');
+  previewDiv.className = 'file-preview';
+  previewDiv.innerHTML =
+    '<div class="file-preview-header">' +
+    '<span>' + path + '</span>' +
+    '<button class="close-btn" onclick="this.parentElement.parentElement.remove()">✕</button>' +
+    '</div>' +
+    '<div class="file-preview-body"><pre>Loading...</pre></div>';
+
+  treeContainer.appendChild(previewDiv);
+
+  var bodyEl = previewDiv.querySelector('.file-preview-body pre');
+
+  if (isBinary) {
+    bodyEl.textContent = '⚠ Binary file — cannot preview as text.';
+    return;
+  }
+
+  // Try API first, fall back to session data
+  var apiUrl = '/api/tools/sandbox/read?path=' + encodeURIComponent(path);
+  fetch(apiUrl)
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.error) {
+        bodyEl.textContent = 'Error: ' + data.error;
+        return;
+      }
+      bodyEl.textContent = data.content;
+      // Syntax highlight with basic coloring
+      _highlightCode(bodyEl);
+    })
+    .catch(function(err) {
+      bodyEl.textContent = 'Failed to load: ' + err.message;
+    });
+}
+
+/**
+ * Basic syntax highlighting for code preview (line-art style, minimal).
+ */
+function _highlightCode(preEl) {
+  var text = preEl.textContent;
+  var lines = text.split('\n');
+  var html = '';
+  lines.forEach(function(line) {
+    // Comments
+    var escaped = line
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+    // Simple highlighting: strings, keywords, comments via spans
+    // Just escape for now — full highlighting would bloat the bundle
+    html += escaped + '\n';
+  });
+  preEl.innerHTML = html;
+}
+
+/**
+ * Find the output content area and append a file tree container after it.
+ */
+function injectFileTreeAfterOutput(data) {
+  var sandboxFiles = data.result && data.result.sandbox_files;
+  if (!sandboxFiles || sandboxFiles.length === 0) {
+    sandboxFiles = data.sandbox_files;
+  }
+  if (!sandboxFiles || sandboxFiles.length === 0) return;
+
+  var outputEl = document.getElementById('outputContent');
+  if (!outputEl) return;
+
+  // Find or create file tree container after output
+  var treeId = 'fileTreeContainer';
+  var treeContainer = document.getElementById(treeId);
+  if (!treeContainer) {
+    treeContainer = document.createElement('div');
+    treeContainer.id = treeId;
+    outputEl.parentNode.insertBefore(treeContainer, outputEl.nextSibling);
+  }
+
+  var sessionId = data.session_id || '';
+  renderFileTree(treeContainer, sandboxFiles, sessionId);
+}
+
+/**
+ * Download a single sandbox file via the API.
+ */
+function downloadSandboxFile(path) {
+  var a = document.createElement('a');
+  a.href = '/api/tools/sandbox/download?path=' + encodeURIComponent(path);
+  a.download = path.split('/').pop();
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+/**
+ * Download the entire sandbox as a ZIP archive.
+ */
+function downloadAllSandbox() {
+  var a = document.createElement('a');
+  a.href = '/api/tools/sandbox/download-all';
+  a.download = 'sandbox.zip';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
 
